@@ -789,9 +789,21 @@ namespace Opc.Ua.Client
                 out revisedPublishingInterval,
                 out revisedLifetimeCounter,
                 out revisedKeepAliveCount);
-            
+
+            UpdateSubscription(subscriptionId, revisedPublishingInterval, revisedKeepAliveCount, revisedLifetimeCounter);
+
+            CreateItems();
+
+            ChangesCompleted();
+        }
+
+        /// <summary>
+        /// Update the subscription with the given revised settings.
+        /// </summary>
+        private void UpdateSubscription(uint subscriptionId, double revisedPublishingInterval, uint revisedKeepAliveCount,
+            uint revisedLifetimeCounter) {
             // update current state.
-            m_id                        = subscriptionId;
+            m_id = subscriptionId;
             m_currentPublishingInterval = revisedPublishingInterval;
             m_currentKeepAliveCount     = revisedKeepAliveCount;
             m_currentLifetimeCount      = revisedLifetimeCounter;
@@ -826,10 +838,46 @@ namespace Opc.Ua.Client
             {
                 Utils.Trace("For subscription {0}, the priority was set to 0.", Id);
             }
+        }
 
-            CreateItems();
+        /// <summary>
+        /// Asynchronously creates a subscription on the server.
+        /// </summary>
+        public void AsyncCreate(AsyncCallback callback)
+        {
+            VerifySubscriptionState(false);
 
-            ChangesCompleted();
+            // create the subscription.
+            uint subscriptionId;
+            double revisedPublishingInterval;
+            uint revisedKeepAliveCount = m_keepAliveCount;
+            uint revisedLifetimeCounter = m_lifetimeCount;
+
+            AdjustCounts(ref revisedKeepAliveCount, ref revisedLifetimeCounter);
+
+            m_session.BeginCreateSubscription(
+                null,
+                m_publishingInterval,
+                revisedLifetimeCounter,
+                revisedKeepAliveCount,
+                m_maxNotificationsPerPublish,
+                m_publishingEnabled,
+                m_priority,
+                asyncResult => {
+                    m_session.EndCreateSubscription(
+                        asyncResult,
+                        out subscriptionId,
+                        out revisedPublishingInterval,
+                        out revisedLifetimeCounter,
+                        out revisedKeepAliveCount);
+
+                    UpdateSubscription(subscriptionId, revisedPublishingInterval, revisedKeepAliveCount, revisedLifetimeCounter);
+
+                    AsyncCreateItems(callback);
+
+                    ChangesCompleted();
+                },
+                null);
         }
 
         /// <summary>
@@ -1180,12 +1228,52 @@ namespace Opc.Ua.Client
         /// </summary>
         public IList<MonitoredItem> CreateItems()
         {
-            VerifySubscriptionState(true);                       
+            List<MonitoredItem> itemsToCreate;
+            MonitoredItemCreateRequestCollection requestItems = PrepareItemsToCreate(out itemsToCreate);
+
+            if (requestItems.Count == 0)
+            {
+                return itemsToCreate;
+            }
+
+            // modify the subscription.
+            MonitoredItemCreateResultCollection results;
+            DiagnosticInfoCollection diagnosticInfos;
+
+            ResponseHeader responseHeader = m_session.CreateMonitoredItems(
+                null,
+                m_id,
+                m_timestampsToReturn,
+                requestItems,
+                out results,
+                out diagnosticInfos);
+
+            ClientBase.ValidateResponse(results, itemsToCreate);
+            ClientBase.ValidateDiagnosticInfos(diagnosticInfos, itemsToCreate);
             
+            // update results.
+            for (int ii = 0; ii < results.Count; ii++)
+            {
+                itemsToCreate[ii].SetCreateResult(requestItems[ii], results[ii], ii, diagnosticInfos, responseHeader);
+            }
+            
+            m_changeMask |= SubscriptionChangeMask.ItemsCreated;
+            ChangesCompleted();
+
+            // return the list of items affected by the change.
+            return itemsToCreate;
+        }
+
+        /// <summary>
+        /// Prepare the creation requests for all monitored items that have not yet been created.
+        /// </summary>
+        private MonitoredItemCreateRequestCollection PrepareItemsToCreate(out List<MonitoredItem> itemsToCreate) {
+            VerifySubscriptionState(true);
+
             ResolveItemNodeIds();
 
             MonitoredItemCreateRequestCollection requestItems = new MonitoredItemCreateRequestCollection();
-            List<MonitoredItem> itemsToCreate = new List<MonitoredItem>();
+            itemsToCreate = new List<MonitoredItem>();
 
             lock (m_cache)
             {
@@ -1221,40 +1309,51 @@ namespace Opc.Ua.Client
                     itemsToCreate.Add(monitoredItem);
                 }
             }
-            
+            return requestItems;
+        }
+
+        /// <summary>
+        /// Asynchronously creates all items that have not already been created.
+        /// </summary>
+        private void AsyncCreateItems(AsyncCallback callback)
+        {
+            List<MonitoredItem> itemsToCreate;
+            MonitoredItemCreateRequestCollection requestItems = PrepareItemsToCreate(out itemsToCreate);
+
             if (requestItems.Count == 0)
             {
-                return itemsToCreate;
+                return;
             }
 
             // modify the subscription.
             MonitoredItemCreateResultCollection results;
             DiagnosticInfoCollection diagnosticInfos;
 
-            ResponseHeader responseHeader = m_session.CreateMonitoredItems(
+            m_session.BeginCreateMonitoredItems(
                 null,
                 m_id,
                 m_timestampsToReturn,
                 requestItems,
-                out results,
-                out diagnosticInfos);
+                asyncResult => {
+                    ResponseHeader responseHeader = m_session.EndCreateMonitoredItems(asyncResult, out results, out diagnosticInfos);
 
-            ClientBase.ValidateResponse(results, itemsToCreate);
-            ClientBase.ValidateDiagnosticInfos(diagnosticInfos, itemsToCreate);
-            
-            // update results.
-            for (int ii = 0; ii < results.Count; ii++)
-            {
-                itemsToCreate[ii].SetCreateResult(requestItems[ii], results[ii], ii, diagnosticInfos, responseHeader);
-            }
-            
-            m_changeMask |= SubscriptionChangeMask.ItemsCreated;
-            ChangesCompleted();
+                    ClientBase.ValidateResponse(results, itemsToCreate);
+                    ClientBase.ValidateDiagnosticInfos(diagnosticInfos, itemsToCreate);
 
-            // return the list of items affected by the change.
-            return itemsToCreate;
+                    // update results.
+                    for (int ii = 0; ii < results.Count; ii++)
+                    {
+                        itemsToCreate[ii].SetCreateResult(requestItems[ii], results[ii], ii, diagnosticInfos, responseHeader);
+                    }
+
+                    m_changeMask |= SubscriptionChangeMask.ItemsCreated;
+                    ChangesCompleted();
+
+                    callback(asyncResult);
+                },
+                null);
         }
-        
+
         /// <summary>
         /// Modies all items that have been changed.
         /// </summary>
