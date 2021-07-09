@@ -11,6 +11,7 @@
 */
 
 using System;
+using System.Collections.Generic;
 
 namespace Opc.Ua
 {
@@ -119,33 +120,51 @@ namespace Opc.Ua
                 return CertificateStoreType.X509Store;
             }
 
+            foreach (string storeTypeName in CertificateStoreType.ResisteredStoreTypeNames)
+            {
+                ICertificateStoreType storeType = CertificateStoreType.GetCertificateStoreTypeByName(storeTypeName);
+                if (storeType.SupportsStorePath(storePath))
+                {
+                    return storeTypeName;
+                }
+            }
+
             return CertificateStoreType.Directory;
         }
 
         /// <summary>
         /// Returns an object that can be used to access the store.
         /// </summary>
-        public static ICertificateStore CreateStore(string storeType)
+        public static ICertificateStore CreateStore(string storeTypeName)
         {
             ICertificateStore store = null;
 
-            if (String.IsNullOrEmpty(storeType))
+            if (String.IsNullOrEmpty(storeTypeName))
             {
                 return new CertificateIdentifierCollection();
             }
 
-            switch (storeType)
+            switch (storeTypeName)
             {
                 case CertificateStoreType.X509Store:
-                    {
-                        store = new X509CertificateStore();
-                        break;
-                    }
+                {
+                    store = new X509CertificateStore();
+                    break;
+                }
                 case CertificateStoreType.Directory:
+                {
+                    store = new DirectoryCertificateStore();
+                    break;
+                }
+                default:
+                {
+                    ICertificateStoreType storeType = CertificateStoreType.GetCertificateStoreTypeByName(storeTypeName);
+                    if (storeType != null)
                     {
-                        store = new DirectoryCertificateStore();
-                        break;
+                        store = storeType.CreateStore();
                     }
+                    break;
+                }
             }
             return store;
         }
@@ -180,6 +199,35 @@ namespace Opc.Ua
     /// </summary>
     public static class CertificateStoreType
     {
+        static CertificateStoreType()
+        {
+            _registeredStoreTypes = new Dictionary<string, ICertificateStoreType>();
+        }
+
+        #region public methods
+        /// <summary>
+        /// Registers a new certificate store type that con be specified in config files.
+        /// </summary>
+        /// <param name="storeTypeName">The name of the store type.</param>
+        /// <param name="storeType"></param>
+        public static void RegisterCertificateStoreType(string storeTypeName, ICertificateStoreType storeType)
+        {
+            _registeredStoreTypes.Add(storeTypeName, storeType);
+        }
+        #endregion public methods
+
+        #region internal methods
+        internal static ICertificateStoreType GetCertificateStoreTypeByName(string storeTypeName)
+        {
+            ICertificateStoreType result;
+            _registeredStoreTypes.TryGetValue(storeTypeName, out result);
+            return result;
+        }
+
+        internal static IReadOnlyCollection<string> ResisteredStoreTypeNames => _registeredStoreTypes.Keys;
+        #endregion internal methods
+
+        #region data members
         /// <summary>
         /// A windows certificate store.
         /// </summary>
@@ -189,6 +237,9 @@ namespace Opc.Ua
         /// A directory certificate store.
         /// </summary>
         public const string Directory = "Directory";
+
+        private static Dictionary<string, ICertificateStoreType> _registeredStoreTypes;
+        #endregion data members
     }
     #endregion
 }
